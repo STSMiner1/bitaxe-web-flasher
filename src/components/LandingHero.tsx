@@ -2,17 +2,17 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { ComputerIcon, Download, Usb, Zap } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '../components/ui/button'
 import { ESPLoader, Transport } from 'esptool-js'
 import Header from './Header'
 import InstructionPanel from './InstructionPanel'
 import Selector from './Selector'
-import device_data from './firmware_data.json'
 
-import { Terminal } from '@xterm/xterm';
-import '@xterm/xterm/css/xterm.css';
+import { Terminal } from '@xterm/xterm'
+import '@xterm/xterm/css/xterm.css'
 
-import { serial } from "web-serial-polyfill";
+import { fetchGithubReleases } from '../services/githubService'
+import { DeviceData } from '../types/firmware'
 
 export default function LandingHero() {
   const [selectedDevice, setSelectedDevice] = useState<string>('')
@@ -25,6 +25,9 @@ export default function LandingHero() {
   const [isLogging, setIsLogging] = useState(false)
   const [isPanelOpen, setIsPanelOpen] = useState(false)
   const [isChromiumBased, setIsChromiumBased] = useState(true)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
   const serialPortRef = useRef<any>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const terminalContainerRef = useRef<HTMLDivElement>(null)
@@ -32,11 +35,15 @@ export default function LandingHero() {
   const textDecoderRef = useRef<TextDecoderStream | null>(null)
   const readableStreamClosedRef = useRef<Promise<void> | null>(null)
   const logsRef = useRef<string>('')
+  const transportRef = useRef<Transport | null>(null)
+
+  const deviceOrder = ['Max', 'Ultra', 'Supra', 'Gamma'];
 
   useEffect(() => {
     const userAgent = navigator.userAgent.toLowerCase();
     const isChromium = /chrome|chromium|crios|edge/i.test(userAgent);
     setIsChromiumBased(isChromium);
+    fetchGithubReleases();
   }, []);
 
   useEffect(() => {
@@ -63,16 +70,24 @@ export default function LandingHero() {
     };
   }, [isLogging]);
 
-  const devices = device_data.devices;
-  const device = selectedDevice !== ''
-    ? devices.find(d => d.name == selectedDevice)!
-    : { boards: [] };
-  const board = selectedBoardVersion !== ''
-    ? device.boards.find(b => b.name == selectedBoardVersion)!
-    : { supported_firmware: [] };
-  const firmware = selectedFirmware !== ''
-    ? board.supported_firmware.find(f => f.version == selectedFirmware)!
-    : { path: '' };
+  const [devices, setDevices] = useState<DeviceData[]>([]);
+
+  useEffect(() => {
+    const loadFirmware = async () => {
+      try {
+        setIsLoading(true);
+        setError(null);
+        const data = await fetchGithubReleases();
+        setDevices(data);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load firmware data');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+  
+    loadFirmware();
+  }, []);
 
   const handleConnect = async () => {
     setIsConnecting(true)
@@ -89,6 +104,7 @@ export default function LandingHero() {
       })
 
       serialPortRef.current = port
+      transportRef.current = new Transport(port)
       setIsConnected(true)
       setStatus('Connected successfully!')
     } catch (error) {
@@ -100,16 +116,38 @@ export default function LandingHero() {
   }
 
   const handleDisconnect = async () => {
-    if (isLogging) {
-      await stopSerialLogging();
-    }
     try {
+      // Stop logging if active
+      if (isLogging) {
+        await stopSerialLogging();
+      }
+
+      // Disconnect transport and wait for unlock
+      if (transportRef.current) {
+        await transportRef.current.disconnect();
+        await transportRef.current.waitForUnlock(1500);
+        transportRef.current = null;
+      }
+
+      // Reset terminal if it exists
+      if (terminalRef.current) {
+        terminalRef.current.reset();
+      }
+
+      // Close serial port
       if (serialPortRef.current?.readable) {
         await serialPortRef.current.close();
       }
       serialPortRef.current = null;
-      setIsConnected(false)
-      setStatus("")
+
+      // Reset UI state
+      setIsConnected(false);
+      setSelectedDevice('');
+      setSelectedBoardVersion('');
+      setSelectedFirmware('');
+      setStatus('');
+      logsRef.current = '';
+
     } catch (error) {
       console.error('Disconnect error:', error);
       setStatus(`Disconnect error: ${error instanceof Error ? error.message : String(error)}`);
@@ -245,6 +283,7 @@ export default function LandingHero() {
         throw new Error('No firmware available for the selected device and board version')
       }
 
+      // Fetch firmware directly from GitHub
       const firmwareResponse = await fetch(firmware.path)
       if (!firmwareResponse.ok) {
         throw new Error('Failed to load firmware file')
@@ -296,6 +335,40 @@ export default function LandingHero() {
       </div>
     )
   }
+
+  if (isLoading) {
+    return (
+      <div className="container px-4 md:px-6 py-12 text-center">
+        <p>Loading firmware data...</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="container px-4 md:px-6 py-12 text-center">
+        <h1 className="text-3xl font-bold tracking-tighter sm:text-4xl md:text-5xl lg:text-6xl/none mb-4">
+          Error Loading Firmware Data
+        </h1>
+        <p className="mx-auto max-w-[700px] text-gray-500 md:text-xl dark:text-gray-400">
+          {error}
+        </p>
+        <Button onClick={fetchGithubReleases} className="mt-4">
+          Retry
+        </Button>
+      </div>
+    )
+  }
+
+  const device = selectedDevice !== ''
+    ? devices.find(d => d.name === selectedDevice)!
+    : { boards: [] };
+  const board = selectedBoardVersion !== ''
+    ? device.boards.find(b => b.name === selectedBoardVersion)!
+    : { supported_firmware: [] };
+  const firmware = selectedFirmware !== ''
+    ? board.supported_firmware.find(f => f.version === selectedFirmware)!
+    : { path: '' };
 
   return (
     <>
